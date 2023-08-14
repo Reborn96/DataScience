@@ -1,0 +1,315 @@
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import unquote
+import pandas as pd
+from tqdm import tqdm
+import yfinance as yf
+import pandas_datareader as pdr
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+import tensorflow as tf
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+import xgboost as xgb
+from IPython.display import clear_output
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+
+def historico(ticker, shifts):
+    # Obter os dados do ticker a partir do Yahoo Finance
+    df = yf.download(ticker, start="2013-01-01")
+    # Renomear as colunas do DataFrame
+    df.rename(columns={'Volume': f'volume_{ticker}'}, inplace=True)
+    # Definir movimento do ticker
+    df[f'mov_{ticker}'] = df.apply(lambda row: 1 if row['Close'] > row['Open'] else 0, axis=1)
+    # Remover outliers usando o método do desvio padrão
+    std_dev = df[f'volume_{ticker}'].std()
+    df = df[df[f'volume_{ticker}'] < df[f'volume_{ticker}'].mean() + 3 * std_dev]
+
+    # Normalizar a coluna "Volume"
+    scaler = MinMaxScaler()
+    df_copy = df.copy()  # Criar uma cópia do DataFrame
+    df_copy[f'volume_{ticker}'] = scaler.fit_transform(df_copy[[f'volume_{ticker}']])
+    
+    # Deixando somente as colunas importantes
+    df_copy = df_copy[[(f'mov_{ticker}'),(f'volume_{ticker}')]]
+    
+    for coluna in df_copy.columns:
+        for shift in range(1, shifts):
+            df_copy[f'{coluna}_{shift}'] = df_copy[coluna].shift(shift)
+    
+    df_copy = df_copy.dropna()
+    df_copy = df_copy.drop(columns=(f'volume_{ticker}'))
+    return df_copy
+
+resultado = historico("ITUB4.SA",1)
+resultado.head(10)
+
+# Adicionar ação do Bradesco
+df_bradesco = historico("BBDC4.SA",6)
+df_bradesco.drop(columns={'mov_BBDC4.SA'}, inplace=True)
+
+# Adicionar ação do Santander
+df_santander = historico("SANB11.SA",6)
+df_santander.drop(columns={'mov_SANB11.SA'}, inplace=True)
+
+# Adicionar ação do Santander
+df_b3 = historico("B3SA3.SA",6)
+df_b3.drop(columns={'mov_B3SA3.SA'}, inplace=True)
+
+# Adicionar ação do Santander
+df_itau = historico("ITUB4.SA",6)
+
+bancos = df_itau.merge(df_bradesco, how = "inner",left_index = True, right_index = True)
+bancos = bancos.merge(df_santander, how = "inner",left_index = True, right_index = True)
+bancos = bancos.merge(df_b3, how = "inner",left_index = True, right_index = True)
+
+def consequentes(df,col,pivot):
+    serie = df[col].values.tolist()
+    if pivot:
+        sobe_desce = []
+    if pivot == False:
+        sobe_desce = []
+    aux = 1
+    for item in range(len(serie)):
+        if serie[item] == 1 and aux > 0:
+            aux += 1
+            sobe_desce.append(aux)
+        elif serie[item] == 0 and aux < 0:
+            aux -= 1
+            sobe_desce.append(aux)
+        elif serie[item] == 1 and serie[item-1] == 0:
+            aux = 1
+            sobe_desce.append(aux)
+        elif serie[item] == 0 and serie[item-1] == 1:
+            aux = -1 
+            sobe_desce.append(aux)
+    df = df.dropna()    
+    df[f'{col}_consequente'] = sobe_desce
+    df[f'{col}_consequente'] = df[f'{col}_consequente'].shift(1)
+    df = df.dropna()
+    return(df)
+
+def prever(df, coluna_a_prever,printar):
+    # Dividir os dados em recursos (X) e o valor alvo (y)
+    X = df.drop(columns=[coluna_a_prever])
+    y = df[coluna_a_prever]
+
+    # Dividir os dados em conjunto de treinamento e teste (80% treinamento, 20% teste)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Definir os parâmetros que serão testados no Decision Tree
+    param_grid_dt = {
+        'criterion': ['gini', 'entropy'],
+        'splitter': ['best', 'random'],
+        'max_depth': [None, 10, 20, 30, 40],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+    print('iniciando DTC')
+    # Criar o modelo Decision Tree
+    dt_model = DecisionTreeClassifier(random_state=42)
+    print('iniciando DTC - xval')
+    # Criar o objeto de busca em grade com cross-validation para o Decision Tree
+    grid_search_dt = GridSearchCV(dt_model, param_grid=param_grid_dt, cv=5, n_jobs=-1, scoring='accuracy')
+
+    # Treinar o modelo usando o conjunto de treinamento
+    grid_search_dt.fit(X_train, y_train)
+
+    # Obter os melhores parâmetros encontrados para o Decision Tree
+    best_params_dt = grid_search_dt.best_params_
+
+    # Treinar o modelo Decision Tree com os melhores parâmetros encontrados
+    best_dt_model = DecisionTreeClassifier(random_state=42, **best_params_dt)
+    best_dt_model.fit(X_train, y_train)
+
+    # Fazer previsões no conjunto de teste usando o modelo Decision Tree
+    y_pred_decision_tree = best_dt_model.predict(X_test)
+
+    # Avaliar a precisão do modelo Decision Tree
+    accuracy_decision_tree = accuracy_score(y_test, y_pred_decision_tree)
+    print('done DTC')
+    # Definir os parâmetros que serão testados no Random Forest
+    param_grid_rf = {
+        'n_estimators': [50, 100, 200],
+        'criterion': ['gini', 'entropy'],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+    print('iniciando RF')
+    # Criar o modelo Random Forest
+    rf_model = RandomForestClassifier(random_state=42)
+    print('iniciando RF - xval')
+    # Criar o objeto de busca em grade com cross-validation para o Random Forest
+    grid_search_rf = GridSearchCV(rf_model, param_grid=param_grid_rf, cv=5, n_jobs=-1, scoring='accuracy')
+
+    # Treinar o modelo usando o conjunto de treinamento
+    grid_search_rf.fit(X_train, y_train)
+
+    # Obter os melhores parâmetros encontrados para o Random Forest
+    best_params_rf = grid_search_rf.best_params_
+    print('Treinando RF')
+    # Treinar o modelo Random Forest com os melhores parâmetros encontrados
+    best_rf_model = RandomForestClassifier(random_state=42, **best_params_rf)
+    best_rf_model.fit(X_train, y_train)
+
+    # Fazer previsões no conjunto de teste usando o modelo Random Forest
+    y_pred_random_forest = best_rf_model.predict(X_test)
+
+    # Avaliar a precisão do modelo Random Forest
+    accuracy_random_forest = accuracy_score(y_test, y_pred_random_forest)
+    print('iniciando XGBOOST')
+    # Definir os parâmetros que serão testados no XGBoost
+    param_grid_xgb = {
+        'learning_rate': [0.01, 0.1, 0.2],
+        'max_depth': [3, 5, 7],
+        'subsample': [0.8, 1.0],
+        'colsample_bytree': [0.8, 1.0],
+        'n_estimators': [100, 200, 300]
+    }
+
+    # Criar o modelo XGBoost
+    xgb_model = xgb.XGBClassifier(random_state=42)
+
+    # Criar o objeto de busca em grade com cross-validation para o XGBoost
+    grid_search_xgb = GridSearchCV(xgb_model, param_grid=param_grid_xgb, cv=5, n_jobs=-1, scoring='accuracy')
+
+    # Treinar o modelo usando o conjunto de treinamento
+    grid_search_xgb.fit(X_train, y_train)
+
+    # Obter os melhores parâmetros encontrados para o XGBoost
+    best_params_xgb = grid_search_xgb.best_params_
+
+    # Treinar o modelo XGBoost com os melhores parâmetros encontrados
+    best_xgb_model = xgb.XGBClassifier(random_state=42, **best_params_xgb)
+    best_xgb_model.fit(X_train, y_train)
+
+    # Fazer previsões no conjunto de teste usando o modelo XGBoost
+    y_pred_xgb = best_xgb_model.predict(X_test)
+    print('done XGboost')
+    # Avaliar a precisão do modelo XGBoost
+    accuracy_xgb = accuracy_score(y_test, y_pred_xgb)
+
+    # Padronizar os dados de treinamento e teste para a rede neural
+    scaler = StandardScaler()
+    X_train_nn = scaler.fit_transform(X_train)
+    X_test_nn = scaler.transform(X_test)
+    print('iniciando RN')
+    # Construir a rede neural com camadas escondidas com o dobro de unidades
+    model = tf.keras.models.Sequential([
+        tf.keras.layers.Dense(128, activation='relu', input_shape=(X_train_nn.shape[1],)),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(32, activation='relu'),  # Primeira camada escondida dobrada
+        tf.keras.layers.Dense(16, activation='relu'),  # Segunda camada escondida dobrada
+        tf.keras.layers.Dense(8, activation='relu'),   # Terceira camada escondida dobrada
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+
+    # Compilar o modelo
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+    # Treinar a rede neural
+    model.fit(X_train_nn, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0)
+
+    # Fazer previsões no conjunto de teste usando a rede neural
+    y_pred_prob = model.predict(X_test_nn)
+    y_pred_neural = (y_pred_prob > 0.5).astype(int)
+    print('Done RN')
+    # Avaliar a precisão da rede neural
+    accuracy_neural = accuracy_score(y_test, y_pred_neural)
+    if printar == True:
+        # Imprimir as precisões dos modelos
+        print(f'Precisão DTC: {grid_search_dt.best_score_:.4f}')
+        print(f'Precisão RF: {grid_search_rf.best_score_:.4f}')
+        print(f'Precisão XGBoost: {grid_search_xgb.best_score_:.4f}')
+        print(f'Precisão DTC com Melhores Parâmetros: {accuracy_decision_tree:.4f}')
+        print(f'Precisão RF com Melhores Parâmetros: {accuracy_random_forest:.4f}')
+        print(f'Precisão XGBoost com Melhores Parâmetros: {accuracy_xgb:.4f}')
+        print(f'Precisão RN: {accuracy_neural:.4f}')
+    return {
+        'DTC': accuracy_decision_tree,
+        'RF': accuracy_random_forest,
+        'XGBoost': accuracy_xgb,
+        'RN': accuracy_neural
+    }
+
+# Criar um dicionário para armazenar os melhores resultados de cada modelo
+melhores_resultados = {
+    'DTC': {'precisao': 0, 'shift': 0},
+    'RF': {'precisao': 0, 'shift': 0},
+    'XGBoost': {'precisao': 0, 'shift': 0},
+    'RN': {'precisao': 0, 'shift': 0}
+}
+
+for x in range(3, 10):
+    # Adicionar ação do Bradesco
+    df_bradesco = historico("BBDC4.SA", x)
+    df_bradesco.drop(columns={'mov_BBDC4.SA'}, inplace=True)
+
+    # Adicionar ação do Santander
+    df_santander = historico("SANB11.SA", x)
+    df_santander.drop(columns={'mov_SANB11.SA'}, inplace=True)
+
+    # Adicionar ação do B3
+    df_b3 = historico("B3SA3.SA", x)
+    df_b3.drop(columns={'mov_B3SA3.SA'}, inplace=True)
+    
+    # Adicionar ação do BTG > Desempenho caiu
+    df_btg = historico("BPAC11.SA", x)
+    df_btg.drop(columns={'mov_BPAC11.SA'}, inplace=True)
+
+    # Adicionar ação do Itaú
+    df_itau = historico("ITUB4.SA", x)
+
+    # Montando dataframe
+    bancos = df_itau.merge(df_bradesco, how="inner", left_index=True, right_index=True)
+    bancos = bancos.merge(df_santander, how="inner", left_index=True, right_index=True)
+    bancos = bancos.merge(df_btg, how="inner", left_index=True, right_index=True)
+    bancos = bancos.merge(df_b3, how="inner", left_index=True, right_index=True)
+    
+    if x == 3:
+        bancos = consequentes(bancos,"mov_ITUB4.SA",pivot = True)
+    if x == 4:
+        bancos = consequentes(bancos,"mov_ITUB4.SA",pivot = False)        
+    
+    # Chamar a função prever e obter as métricas de precisão
+    resultados = prever(bancos, "mov_ITUB4.SA", printar=True)
+
+    # Atualizar os melhores resultados para cada modelo, se necessário
+    if resultados['DTC'] > melhores_resultados['DTC']['precisao']:
+        melhores_resultados['DTC']['precisao'] = resultados['DTC']
+        melhores_resultados['DTC']['shift'] = x
+
+    if resultados['RF'] > melhores_resultados['RF']['precisao']:
+        melhores_resultados['RF']['precisao'] = resultados['RF']
+        melhores_resultados['RF']['shift'] = x
+
+    if resultados['XGBoost'] > melhores_resultados['XGBoost']['precisao']:
+        melhores_resultados['XGBoost']['precisao'] = resultados['XGBoost']
+        melhores_resultados['XGBoost']['shift'] = x
+
+    if resultados['RN'] > melhores_resultados['RN']['precisao']:
+        melhores_resultados['RN']['precisao'] = resultados['RN']
+        melhores_resultados['RN']['shift'] = x
+
+    print(f"Shift {x}:")
+    print(f"Precisão DTC: {resultados['DTC']:.4f}")
+    print(f"Precisão RF: {resultados['RF']:.4f}")
+    print(f"Precisão XGBoost: {resultados['XGBoost']:.4f}")
+    print(f"Precisão RN: {resultados['RN']:.4f}")
+    print("-" * 100)
+    
+
+# Imprimir os melhores resultados encontrados
+print("Melhores Resultados:")
+print(f"Melhor Precisão DTC: {melhores_resultados['DTC']['precisao']:.4f} - Shift {melhores_resultados['DTC']['shift']}")
+print(f"Melhor Precisão RF: {melhores_resultados['RF']['precisao']:.4f} - Shift {melhores_resultados['RF']['shift']}")
+print(f"Melhor Precisão XGBoost: {melhores_resultados['XGBoost']['precisao']:.4f} - Shift {melhores_resultados['XGBoost']['shift']}")
+print(f"Melhor Precisão RN: {melhores_resultados['RN']['precisao']:.4f} - Shift {melhores_resultados['RN']['shift']}")
